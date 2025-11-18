@@ -6,4 +6,5 @@ pyotp
 colorama
 requests
 NorenRestApiPy
+websocket
 
