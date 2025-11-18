@@ -794,6 +794,103 @@ class NiftyOptionChainLTP:
             'vol_ratio': vol_ratio
         }
 
+    def calculate_strike_score(self, strike):
+        """
+        Calculate score for each strike based on OI and Volume pressure
+        High CE Volume = Bearish (sellers active)
+        High PE Volume = Bullish (put buyers/call sellers)
+        Returns: float score (-10 to +10, negative=bearish, positive=bullish)
+        """
+        if not hasattr(self, 'option_data') or not self.option_data:
+            return 0.0
+
+        # Get CE and PE data for this strike
+        ce_data = None
+        pe_data = None
+
+        for token, data in self.option_data.items():
+            if int(data.get('strike', 0)) == strike:
+                if data.get('type') == 'CE':
+                    ce_data = data
+                elif data.get('type') == 'PE':
+                    pe_data = data
+
+        if not ce_data or not pe_data:
+            return 0.0
+
+        score = 0.0
+
+        # 1. Volume Score (5m focus - most important)
+        ce_vol_5m = abs(ce_data.get('vol_chg_5m', 0))
+        pe_vol_5m = abs(pe_data.get('vol_chg_5m', 0))
+        total_vol_5m = ce_vol_5m + pe_vol_5m
+
+        if total_vol_5m > 100:  # Minimum activity threshold
+            pe_pct = (pe_vol_5m / total_vol_5m) * 100
+
+            # High PE volume = Bullish
+            if pe_pct >= 75:
+                score += 4.0  # Strong bullish
+            elif pe_pct >= 60:
+                score += 2.0  # Bullish
+            # High CE volume = Bearish
+            elif pe_pct <= 25:
+                score -= 4.0  # Strong bearish
+            elif pe_pct <= 40:
+                score -= 2.0  # Bearish
+
+        # 2. OI Change Score (Multi-timeframe)
+        # CE OI increasing + PE OI decreasing = Bearish (resistance building)
+        # CE OI decreasing + PE OI increasing = Bullish (support building)
+
+        timeframes = {
+            '5m': 0.4,  # 40% weight
+            '15m': 0.3,  # 30% weight
+            '1h': 0.2,  # 20% weight
+            'day': 0.1  # 10% weight
+        }
+
+        for tf, weight in timeframes.items():
+            ce_oi_chg = ce_data.get(f'oi_chg_{tf}', 0)
+            pe_oi_chg = pe_data.get(f'oi_chg_{tf}', 0)
+
+            # CE Building + PE Unwinding = Bearish (writers selling calls = resistance)
+            if ce_oi_chg > 1000 and pe_oi_chg < -1000:
+                score -= 2.0 * weight
+
+            # CE Unwinding + PE Building = Bullish (writers selling puts = support)
+            elif ce_oi_chg < -1000 and pe_oi_chg > 1000:
+                score += 2.0 * weight
+
+            # Both building heavily = uncertainty (favor the bigger one)
+            elif abs(ce_oi_chg) > 5000 and abs(pe_oi_chg) > 5000:
+                if pe_oi_chg > ce_oi_chg * 1.3:
+                    score += 1.0 * weight  # PE dominance
+                elif ce_oi_chg > pe_oi_chg * 1.3:
+                    score -= 1.0 * weight  # CE dominance
+
+        # 3. Position multiplier based on ATM distance
+        atm = int(round(self.current_ltp / 50, 0)) * 50
+        strike_diff = abs(strike - atm)
+
+        if strike == atm:
+            # ATM - maximum fight, amplify score
+            multiplier = 1.5
+        elif strike_diff <= 100:
+            # Near ATM (1-2 strikes away) - very relevant
+            multiplier = 1.2
+        elif strike_diff <= 200:
+            # Moderate distance - somewhat relevant
+            multiplier = 1.0
+        else:
+            # Far OTM - less relevant
+            multiplier = 0.7
+
+        final_score = score * multiplier
+
+        # Cap score between -10 and +10
+        return max(-10.0, min(10.0, round(final_score, 2)))
+
     def check_oi_support_resistance(self, spot_price, direction, range_points=20):
         """
         Check if spot is approaching a strong OI support/resistance level

@@ -204,7 +204,7 @@ class StreamlitTradingSystem(NiftyOptionChainLTP):
                         f"[{timestamp.strftime('%H:%M:%S')}] {name} ENTER {entry_dir} @ {spot_price:.2f} | Score: {score:.2f}")
 
     def get_basic_option_chain_formatted(self):
-        """Format option chain with bid-ask difference"""
+        """Format option chain with strike score"""
         if not hasattr(self, 'option_data') or not self.option_data:
             return pd.DataFrame()
 
@@ -223,113 +223,139 @@ class StreamlitTradingSystem(NiftyOptionChainLTP):
                 }
 
             if data.get('type') == 'CE':
-                strikes_dict[strike]['CE B-A'] = data.get('qtydiff', 0)  # Integer
+                strikes_dict[strike]['CE B-A'] = data.get('qtydiff', 0)
                 strikes_dict[strike]['CE LTP'] = f"{data.get('ltp', 0):.2f}"
                 strikes_dict[strike]['CE OI'] = f"{data.get('oi', 0):,}"
                 strikes_dict[strike]['CE OI Chg'] = f"{data.get('oi_chg_day', 0):,}"
                 strikes_dict[strike]['CE Volume'] = f"{data.get('volume', 0):,}"
+
             elif data.get('type') == 'PE':
                 strikes_dict[strike]['PE LTP'] = f"{data.get('ltp', 0):.2f}"
                 strikes_dict[strike]['PE OI'] = f"{data.get('oi', 0):,}"
                 strikes_dict[strike]['PE OI Chg'] = f"{data.get('oi_chg_day', 0):,}"
                 strikes_dict[strike]['PE Volume'] = f"{data.get('volume', 0):,}"
-                strikes_dict[strike]['PE B-A'] = data.get('qtydiff', 0)  # Integer
+                strikes_dict[strike]['PE B-A'] = data.get('qtydiff', 0)
 
         if not strikes_dict:
             return pd.DataFrame()
+
+        # Calculate score for each strike
+        for strike in strikes_dict.keys():
+            strikes_dict[strike]['Score'] = self.calculate_strike_score(strike)
 
         # Create DataFrame
         df = pd.DataFrame(list(strikes_dict.values()))
         df = df.sort_values('Strike').reset_index(drop=True)
 
-        # Column order (with bid-ask)
+        # Column order (Score added between Strike and PE LTP)
         cols = [
             'CE B-A', 'CE OI', 'CE OI Chg', 'CE Volume', 'CE LTP',
-            'Strike',
+            'Strike', 'Score',
             'PE LTP', 'PE Volume', 'PE OI Chg', 'PE OI', 'PE B-A'
         ]
 
+        # Fill missing columns
         for col in cols:
             if col not in df.columns:
-                if 'B-A' in col:
-                    df[col] = 0  # Number
+                if col == 'Score':
+                    df[col] = 0.0
+                elif 'B-A' in col:
+                    df[col] = 0
                 else:
-                    df[col] = '0'  # String
+                    df[col] = '0'
 
-        # Ensure B-A columns are integers (not strings)
-        df['CE B-A'] = pd.to_numeric(df['CE B-A'], errors='coerce').fillna(0).astype(int)
-        df['PE B-A'] = pd.to_numeric(df['PE B-A'], errors='coerce').fillna(0).astype(int)
-
-        # Keep only display columns + internal _is_atm flag
         df = df[cols + ['_is_atm']]
+
         return df
 
     def highlight_extremes(self, df):
-        """Apply highlighting like original streamlit_option_chain.py"""
+        """Apply highlighting with Score column"""
+        df_numeric = df.replace(',', '', regex=True)
 
-        df_numeric = df.replace({',': ''}, regex=True)
-
+        # Convert numeric columns
         for col in ['CE OI', 'CE OI Chg', 'PE OI', 'PE OI Chg', 'CE Volume', 'PE Volume']:
             df_numeric[col] = pd.to_numeric(df_numeric[col], errors='coerce')
 
+        # Get sorted values for OI/Volume highlighting
         ce_oi_sorted = df_numeric['CE OI'].sort_values(ascending=False).unique()
-        ce_oi_chg_sorted = df_numeric['CE OI Chg'].sort_values(ascending=False).unique()
+        ce_oichg_sorted = df_numeric['CE OI Chg'].sort_values(ascending=False).unique()
         pe_oi_sorted = df_numeric['PE OI'].sort_values(ascending=False).unique()
-        pe_oi_chg_sorted = df_numeric['PE OI Chg'].sort_values(ascending=False).unique()
+        pe_oichg_sorted = df_numeric['PE OI Chg'].sort_values(ascending=False).unique()
         ce_vol_sorted = df_numeric['CE Volume'].sort_values(ascending=False).unique()
         pe_vol_sorted = df_numeric['PE Volume'].sort_values(ascending=False).unique()
 
         def style_func(val, col):
+            # Score column styling
+            if col == 'Score':
+                try:
+                    score = float(val)
+                    if score >= 3.0:
+                        return 'background-color:#28a745;color:white;font-weight:bold'  # Strong bullish
+                    elif score >= 1.5:
+                        return 'background-color:#7bc96f;color:black'  # Bullish
+                    elif score <= -3.0:
+                        return 'background-color:#dc3545;color:white;font-weight:bold'  # Strong bearish
+                    elif score <= -1.5:
+                        return 'background-color:#f66;color:white'  # Bearish
+                    else:
+                        return 'background-color:#ffc107;color:black'  # Neutral
+                except:
+                    return ''
+
+            # Existing styling for other columns
             try:
-                val_num = float(val.replace(",", ""))
+                val_num = float(val.replace(',', ''))
             except:
-                return ""
+                return ''
 
             if col == 'CE OI':
                 if val_num == ce_oi_sorted[0]:
-                    return 'background-color:#ff5c5c;color:white;font-weight:bold;'
+                    return 'background-color:#ff5c5c;color:white;font-weight:bold'
                 elif len(ce_oi_sorted) > 1 and val_num == ce_oi_sorted[1]:
-                    return 'background-color:#ffb3b3;color:black;'
+                    return 'background-color:#ffb3b3;color:black'
 
             if col == 'CE OI Chg':
-                if val_num == ce_oi_chg_sorted[0]:
-                    return 'background-color:#b90b0b;color:white;font-weight:bold;'
-                elif len(ce_oi_chg_sorted) > 1 and val_num == ce_oi_chg_sorted[1]:
-                    return 'background-color:#ffb3b3;color:black;'
+                if val_num == ce_oichg_sorted[0]:
+                    return 'background-color:#b90b0b;color:white;font-weight:bold'
+                elif len(ce_oichg_sorted) > 1 and val_num == ce_oichg_sorted[1]:
+                    return 'background-color:#ffb3b3;color:black'
 
             if col == 'PE OI':
                 if val_num == pe_oi_sorted[0]:
-                    return 'background-color:#13ad13;color:white;font-weight:bold;'
+                    return 'background-color:#13ad13;color:white;font-weight:bold'
                 elif len(pe_oi_sorted) > 1 and val_num == pe_oi_sorted[1]:
-                    return 'background-color:#b3ffb3;color:black;'
+                    return 'background-color:#b3ffb3;color:black'
 
             if col == 'PE OI Chg':
-                if val_num == pe_oi_chg_sorted[0]:
-                    return 'background-color:#0b793b;color:white;font-weight:bold;'
-                elif len(pe_oi_chg_sorted) > 1 and val_num == pe_oi_chg_sorted[1]:
-                    return 'background-color:#b3ffb3;color:black;'
+                if val_num == pe_oichg_sorted[0]:
+                    return 'background-color:#0b793b;color:white;font-weight:bold'
+                elif len(pe_oichg_sorted) > 1 and val_num == pe_oichg_sorted[1]:
+                    return 'background-color:#b3ffb3;color:black'
 
             if col == 'CE Volume':
                 if val_num == ce_vol_sorted[0]:
-                    return 'background-color:#6dfc6d;color:black;font-weight:bold;'
+                    return 'background-color:#6dfc6d;color:black;font-weight:bold'
                 elif len(ce_vol_sorted) > 1 and val_num == ce_vol_sorted[1]:
-                    return 'background-color:#cefaad;color:black;'
+                    return 'background-color:#cefaad;color:black'
 
             if col == 'PE Volume':
                 if val_num == pe_vol_sorted[0]:
-                    return 'background-color:#fd9b9b;color:black;font-weight:bold;'
+                    return 'background-color:#fd9b9b;color:black;font-weight:bold'
                 elif len(pe_vol_sorted) > 1 and val_num == pe_vol_sorted[1]:
-                    return 'background-color:#ffd6d6;color:black;'
+                    return 'background-color:#ffd6d6;color:black'
 
-            return ""
+            return ''
 
-        return df.style \
+        styled = df.style \
+            .applymap(lambda v: style_func(v, 'Score'), subset=['Score']) \
             .applymap(lambda v: style_func(v, 'CE OI'), subset=['CE OI']) \
             .applymap(lambda v: style_func(v, 'PE OI'), subset=['PE OI']) \
             .applymap(lambda v: style_func(v, 'CE OI Chg'), subset=['CE OI Chg']) \
             .applymap(lambda v: style_func(v, 'PE OI Chg'), subset=['PE OI Chg']) \
             .applymap(lambda v: style_func(v, 'CE Volume'), subset=['CE Volume']) \
             .applymap(lambda v: style_func(v, 'PE Volume'), subset=['PE Volume'])
+
+        return styled
 
     def get_oi_analysis_enhanced(self):
         """Enhanced OI analysis with proper ATM detection"""
